@@ -1,0 +1,12 @@
+# 忽略 Python 虛擬環境
+.venv/
+venv/
+env/
+ENV/
+
+# 忽略 Python 快取與暫存檔
+__pycache__/
+*.pyc
+
+# 如果有環境變數檔也建議忽略
+.env
