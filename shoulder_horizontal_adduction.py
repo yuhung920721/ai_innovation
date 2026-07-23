@@ -18,6 +18,7 @@
 #       wrist 與對側肩膀的距離 < 門檻（手掌真的靠近對側肩膀，而非只是彎曲手肘）
 # ------------------------------------------------------------
 
+import argparse
 import time
 import cv2
 import numpy as np
@@ -29,15 +30,17 @@ from pose_utils import (
     calculate_angle,
     euclidean_distance,
     RepCounter,
-    LANDMARK_NAMES,
-    OPPOSITE_SHOULDER_NAME,
+    build_landmark_names,
     draw_body_pose,
 )
 
-ELBOW_STRAIGHT_MIN = 150      # S2: 手肘打直門檻
-ELBOW_BENT_MAX = 100           # S1: 手肘彎曲門檻
 LIFT_ANGLE_S2_MIN, LIFT_ANGLE_S2_MAX = 70, 110   # S2: 手臂與肩同高(約90度抬舉)
 WRIST_NEAR_OPPOSITE_SHOULDER_DIST = 0.18          # S1: 手腕靠近對側肩膀的距離門檻
+WRIST_FAR_FROM_OPPOSITE_SHOULDER_DIST = 0.35      # S2: 手腕須遠離對側肩膀(確認真的伸展到側邊)
+S0_LIFT_ANGLE_MAX = 45      # S0: 手臂垂下(準備動作)的抬舉角度門檻
+                             # 注意：此處lift_angle用「髖-肩-腕」計算(非髖-肩-肘)，
+                             # 前臂自然垂放時會有一些偏移，門檻本來就會比只看上臂的
+                             # 側舉/前舉(15度)高一些，是正常現象，非誤差
 VISIBILITY_THRESHOLD = 0.5
 
 TARGET_COUNT = 5
@@ -51,9 +54,19 @@ def classify_state(hip, shoulder, elbow, wrist, opposite_shoulder):
     lift_angle = calculate_angle(hip, shoulder, wrist)
     wrist_to_opp_shoulder = euclidean_distance(wrist[:2], opposite_shoulder[:2])
 
-    if elbow_angle <= ELBOW_BENT_MAX and wrist_to_opp_shoulder <= WRIST_NEAR_OPPOSITE_SHOULDER_DIST:
+    # S0: 手臂垂下的準備動作
+    if lift_angle <= S0_LIFT_ANGLE_MAX:
+        return "S0", elbow_angle, lift_angle
+
+    # 注意：手肘角度在這個動作裡不當作硬性判斷門檻（實測發現手肘角度在
+    # S1/S2 之間的關係因人而異，跟原本假設不一致），只用手腕與對側肩膀
+    # 的距離、以及抬舉角度來判斷，手肘角度保留給計分(角度標準度)使用。
+    if wrist_to_opp_shoulder <= WRIST_NEAR_OPPOSITE_SHOULDER_DIST:
         return "S1", elbow_angle, lift_angle
-    elif elbow_angle >= ELBOW_STRAIGHT_MIN and LIFT_ANGLE_S2_MIN <= lift_angle <= LIFT_ANGLE_S2_MAX:
+    elif (
+        wrist_to_opp_shoulder >= WRIST_FAR_FROM_OPPOSITE_SHOULDER_DIST
+        and LIFT_ANGLE_S2_MIN <= lift_angle <= LIFT_ANGLE_S2_MAX
+    ):
         return "S2", elbow_angle, lift_angle
     return None, elbow_angle, lift_angle
 
@@ -64,6 +77,15 @@ def angle_to_confidence(value, target, tolerance=30):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="手臂平舉(肩關節水平內收)偵測程式")
+    parser.add_argument(
+        "--side", choices=["left", "right"], default="right",
+        help="選擇要偵測的慣用手，預設為右手(right)",
+    )
+    args = parser.parse_args()
+    landmark_names, opposite_shoulder_name = build_landmark_names(args.side)
+    print(f"目前偵測手臂：{'左手' if args.side == 'left' else '右手'}")
+
     cap = cv2.VideoCapture(0)
     cap.set(3, 640)
     cap.set(4, 480)
@@ -95,22 +117,24 @@ def main():
 
             if results.pose_landmarks:
                 lm = results.pose_landmarks.landmark
-                hip, hip_vis = get_point(lm, LANDMARK_NAMES["HIP"])
-                shoulder, sh_vis = get_point(lm, LANDMARK_NAMES["SHOULDER"])
-                elbow, el_vis = get_point(lm, LANDMARK_NAMES["ELBOW"])
-                wrist, wr_vis = get_point(lm, LANDMARK_NAMES["WRIST"])
-                opp_shoulder, opp_vis = get_point(lm, OPPOSITE_SHOULDER_NAME)
+                hip, hip_vis = get_point(lm, landmark_names["HIP"])
+                shoulder, sh_vis = get_point(lm, landmark_names["SHOULDER"])
+                elbow, el_vis = get_point(lm, landmark_names["ELBOW"])
+                wrist, wr_vis = get_point(lm, landmark_names["WRIST"])
+                opp_shoulder, opp_vis = get_point(lm, opposite_shoulder_name)
 
                 if min(hip_vis, sh_vis, el_vis, wr_vis, opp_vis) >= VISIBILITY_THRESHOLD:
                     state, elbow_angle, lift_angle = classify_state(
                         hip, shoulder, elbow, wrist, opp_shoulder
                     )
-                    predicted_label = state if state else "S0"
+                    predicted_label = state  # None(過渡角度)保持None,不誤判成S0(中立姿勢)
 
                     if predicted_label == "S1":
-                        confidence = angle_to_confidence(elbow_angle, 60, tolerance=40)
+                        # 實測S1(手掌碰肩)最標準時手肘角度約150度
+                        confidence = angle_to_confidence(elbow_angle, 150, tolerance=30)
                     elif predicted_label == "S2":
-                        confidence = angle_to_confidence(elbow_angle, 180, tolerance=30)
+                        # 實測S2(手臂平舉)最標準時手肘角度約110度
+                        confidence = angle_to_confidence(elbow_angle, 110, tolerance=30)
 
                 draw_body_pose(image, results.pose_landmarks)
 
@@ -128,13 +152,13 @@ def main():
             draw.text((10, 10), f"目前動作：{predicted_label_chinese}", fill=(0, 0, 0), font=font)
 
             prompt_text = {
-                "NEUTRAL_WAIT": "請回到中立姿勢(手臂自然垂下)",
+                "NEUTRAL_WAIT": "請回到準備動作（立正站好，手臂自然垂下）",
                 "AWAITING_S1": f"請做「{action_mapping['S1']}」動作",  # 第一步：手掌碰肩
                 "AWAITING_S2": f"請做「{action_mapping['S2']}」動作",  # 第二步：手臂平舉
             }.get(counter.phase, "")
             draw.text((10, 46), f"提示：{prompt_text}", fill=(0, 100, 200), font=font)
 
-            draw.text((10, 82), f"手肘角度：{elbow_angle:.1f}°", fill=(0, 0, 0), font=font)
+            draw.text((10, 82), f"手肘角度：{elbow_angle:.1f}°　抬舉角度：{lift_angle:.1f}°", fill=(0, 0, 0), font=font)
             draw.text((10, 118), f"次數: {counter.total}", fill=(0, 0, 0), font=font)
 
             circle_color_s1 = (0, 255, 0) if counter.s1_done else (0, 0, 255)

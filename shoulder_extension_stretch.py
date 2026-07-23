@@ -19,6 +19,7 @@
 #       wrist 與同側耳朵的距離 < 門檻（手已收回貼近後頸/耳側）
 # ------------------------------------------------------------
 
+import argparse
 import time
 import cv2
 import numpy as np
@@ -30,7 +31,7 @@ from pose_utils import (
     calculate_angle,
     euclidean_distance,
     RepCounter,
-    LANDMARK_NAMES,
+    build_landmark_names,
     draw_body_pose,
 )
 
@@ -38,7 +39,9 @@ SHOULDER_ANGLE_S1_MIN = 150     # S1: 手臂舉過頭頂的角度門檻
 ELBOW_ANGLE_S1_MIN = 100        # S1: 手肘打直門檻
 ELBOW_ANGLE_S2_MIN, ELBOW_ANGLE_S2_MAX = 15, 100   # S2: 手肘彎曲區間（貼頸時彎曲幅度較大）
 WRIST_NEAR_EAR_DIST = 0.20      # S2: 手腕貼近耳側/後頸的距離門檻
-VISIBILITY_THRESHOLD = 0.5
+S0_SHOULDER_ANGLE_MAX = 50      # S0: 準備動作(坐姿)的抬舉角度門檻，與手臂前舉設計一致
+VISIBILITY_THRESHOLD = 0.3      # 降低可信度門檻(原0.5)，手貼後頸時手腕/耳朵容易被遮擋，
+                                 # 可信度會偏低，門檻太嚴格會導致角度無法計算(顯示變成0)
 
 TARGET_COUNT = 5
 
@@ -50,6 +53,10 @@ def classify_state(hip, shoulder, elbow, wrist, ear):
     shoulder_angle = calculate_angle(hip, shoulder, wrist)
     elbow_angle = calculate_angle(shoulder, elbow, wrist)
     wrist_to_ear = euclidean_distance(wrist[:2], ear[:2])
+
+    # S0: 準備動作(手臂垂放/坐姿手放大腿)，先前完全沒有定義
+    if shoulder_angle <= S0_SHOULDER_ANGLE_MAX:
+        return "S0", shoulder_angle, elbow_angle
 
     if shoulder_angle >= SHOULDER_ANGLE_S1_MIN and elbow_angle >= ELBOW_ANGLE_S1_MIN:
         return "S1", shoulder_angle, elbow_angle
@@ -67,6 +74,15 @@ def angle_to_confidence(value, target, tolerance=30):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="手臂後舉(肩後伸暨觸頸伸展)偵測程式")
+    parser.add_argument(
+        "--side", choices=["left", "right"], default="right",
+        help="選擇要偵測的慣用手，預設為右手(right)",
+    )
+    args = parser.parse_args()
+    landmark_names, _ = build_landmark_names(args.side)
+    print(f"目前偵測手臂：{'左手' if args.side == 'left' else '右手'}")
+
     cap = cv2.VideoCapture(0)
     cap.set(3, 640)
     cap.set(4, 480)
@@ -74,7 +90,7 @@ def main():
     cv2.resizeWindow("Frame", 800, 600)
 
     counter = RepCounter(target_count=TARGET_COUNT)
-    action_mapping = {"S0": "無動作", "S1": "握拳向前", "S2": "握拳向後", None: "動作中"}
+    action_mapping = {"S0": "無動作", "S1": "雙臂上舉", "S2": "雙臂後舉", None: "動作中"}
 
     with mp_pose.Pose(
         min_detection_confidence=0.5, min_tracking_confidence=0.5, model_complexity=1
@@ -98,27 +114,30 @@ def main():
 
             if results.pose_landmarks:
                 lm = results.pose_landmarks.landmark
-                hip, hip_vis = get_point(lm, LANDMARK_NAMES["HIP"])
-                shoulder, sh_vis = get_point(lm, LANDMARK_NAMES["SHOULDER"])
-                elbow, el_vis = get_point(lm, LANDMARK_NAMES["ELBOW"])
-                wrist, wr_vis = get_point(lm, LANDMARK_NAMES["WRIST"])
-                ear, ear_vis = get_point(lm, LANDMARK_NAMES["EAR"])
+                hip, hip_vis = get_point(lm, landmark_names["HIP"])
+                shoulder, sh_vis = get_point(lm, landmark_names["SHOULDER"])
+                elbow, el_vis = get_point(lm, landmark_names["ELBOW"])
+                wrist, wr_vis = get_point(lm, landmark_names["WRIST"])
+                ear, ear_vis = get_point(lm, landmark_names["EAR"])
 
                 if min(hip_vis, sh_vis, el_vis, wr_vis, ear_vis) >= VISIBILITY_THRESHOLD:
                     state, shoulder_angle, elbow_angle = classify_state(
                         hip, shoulder, elbow, wrist, ear
                     )
-                    predicted_label = state if state else "S0"
+                    predicted_label = state  # None(過渡角度)保持None,不誤判成S0(中立姿勢)
 
                     if predicted_label == "S1":
                         # 依實測數據，肩角150~170度、肘角105~125度才是真正做到
                         # 最標準的姿勢(人體結構上握拳過頭很難打到理論值180度全直)
                         # 兩個指標都納入計分，取平均
-                        shoulder_conf = angle_to_confidence(shoulder_angle, 160, tolerance=30)
-                        elbow_conf = angle_to_confidence(elbow_angle, 115, tolerance=30)
+                        shoulder_conf = angle_to_confidence(shoulder_angle, 170, tolerance=30)
+                        elbow_conf = angle_to_confidence(elbow_angle, 110, tolerance=30)
                         confidence = (shoulder_conf + elbow_conf) / 2
                     elif predicted_label == "S2":
-                        confidence = angle_to_confidence(elbow_angle, 60, tolerance=30)
+                        # 依實測數據，肩角約100度、肘角約80度才是真正做到最標準的貼頸姿勢
+                        shoulder_conf_s2 = angle_to_confidence(shoulder_angle, 100, tolerance=30)
+                        elbow_conf_s2 = angle_to_confidence(elbow_angle, 80, tolerance=30)
+                        confidence = (shoulder_conf_s2 + elbow_conf_s2) / 2
 
                 draw_body_pose(image, results.pose_landmarks)
 
@@ -135,20 +154,21 @@ def main():
             draw.text((10, 10), f"目前動作：{predicted_label_chinese}", fill=(0, 0, 0), font=font)
 
             prompt_text = {
-                "NEUTRAL_WAIT": "請回到中立姿勢(手臂自然垂下)",
+                "NEUTRAL_WAIT": "請回到準備動作（立正站好，手臂自然垂下）",
                 "AWAITING_S1": f"請做「{action_mapping['S1']}」動作",
                 "AWAITING_S2": f"請做「{action_mapping['S2']}」動作",
             }.get(counter.phase, "")
             draw.text((10, 46), f"提示：{prompt_text}", fill=(0, 100, 200), font=font)
+            draw.text((10, 82), "※ 本動作請側身面對鏡頭，避免手部被頭部遮擋", fill=(200, 0, 0), font=font)
 
-            draw.text((10, 82), f"肩角:{shoulder_angle:.0f}° 肘角:{elbow_angle:.0f}°", fill=(0, 0, 0), font=font)
-            draw.text((10, 118), f"次數: {counter.total}", fill=(0, 0, 0), font=font)
+            draw.text((10, 118), f"肩角:{shoulder_angle:.0f}° 肘角:{elbow_angle:.0f}°", fill=(0, 0, 0), font=font)
+            draw.text((10, 154), f"次數: {counter.total}", fill=(0, 0, 0), font=font)
 
             circle_color_s1 = (0, 255, 0) if counter.s1_done else (0, 0, 255)
             circle_color_s2 = (0, 255, 0) if counter.s2_done else (0, 0, 255)
-            draw.text((450, 10), "向前完成：", fill=(0, 0, 0), font=font)
+            draw.text((450, 10), "上舉完成：", fill=(0, 0, 0), font=font)
             draw.ellipse([(600, 15), (620, 35)], fill=circle_color_s1)
-            draw.text((450, 46), "向後完成：", fill=(0, 0, 0), font=font)
+            draw.text((450, 46), "後舉完成：", fill=(0, 0, 0), font=font)
             draw.ellipse([(600, 51), (620, 71)], fill=circle_color_s2)
 
             progress_bar_width = int((counter.target_percentage / 100) * pil_image.width)

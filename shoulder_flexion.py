@@ -6,13 +6,15 @@
 # 【關節點】RIGHT_HIP - RIGHT_SHOULDER - RIGHT_WRIST（軀幹到手腕的抬舉角度）
 #           另外用 LEFT_WRIST 與 RIGHT_WRIST 的距離，確認雙手是否輕握在一起
 # 【判斷邏輯】
-#     angle ≈ 0°          手臂垂下（S0 無動作）
-#     angle ≈ 90°         雙手前舉與肩同高（S1 雙臂前舉）
-#     angle ≈ 150°~180°   雙手舉高貼耳（S2 雙臂上舉）
-#     並要求 wrists_together=True，避免與「側舉」動作混淆
+# 【判斷邏輯】
+#     angle ≈ 0°~35°(坐姿)  雙手垂放/放於大腿（S0 準備動作）
+#     angle ≈ 70°           雙手前舉（S1 雙臂前舉）
+#     angle ≈ 170°          雙手舉高貼耳（S2 雙臂上舉）
+#     並要求 wrists_together=True，避免與「側舉」動作混淆(S0判斷除外)
 #     （前舉時雙手應維持在身體中線附近，側舉時雙手會分開在身體兩側）
 # ------------------------------------------------------------
 
+import argparse
 import time
 import cv2
 import numpy as np
@@ -24,13 +26,13 @@ from pose_utils import (
     calculate_angle,
     euclidean_distance,
     RepCounter,
-    LANDMARK_NAMES,
+    build_landmark_names,
     draw_body_pose,
 )
 
-S1_ANGLE_MIN, S1_ANGLE_MAX = 70, 110
-S2_ANGLE_MIN = 150
-S0_ANGLE_MAX = 20
+S1_ANGLE_MIN, S1_ANGLE_MAX = 60, 100      # 前舉：實測目標約80度
+S2_ANGLE_MIN = 155                        # 上舉：實測目標約170度
+S0_ANGLE_MAX = 50                         # 準備動作：坐姿時手放大腿上，實測角度門檻
 WRISTS_TOGETHER_MAX_DIST = 0.15   # 正規化座標下，雙手腕距離門檻(依畫面比例微調)
 VISIBILITY_THRESHOLD = 0.5
 
@@ -42,10 +44,14 @@ font = ImageFont.truetype(fontpath, 30)
 
 def classify_state(hip, shoulder, wrist, wrists_together):
     angle = calculate_angle(hip, shoulder, wrist)
-    if not wrists_together:
-        return None, angle  # 雙手沒有合握，不視為前舉的有效動作
+
+    # S0 獨立判斷，不受雙手是否握合影響
+    # (坐姿準備動作時，雙手不一定會刻意握在一起)
     if angle <= S0_ANGLE_MAX:
         return "S0", angle
+
+    if not wrists_together:
+        return None, angle  # 雙手沒有合握，不視為前舉的有效動作(S1/S2)
     elif S1_ANGLE_MIN <= angle <= S1_ANGLE_MAX:
         return "S1", angle
     elif angle >= S2_ANGLE_MIN:
@@ -59,6 +65,15 @@ def angle_to_confidence(angle, target_angle, tolerance=30):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="手臂前舉(肩關節前屈)偵測程式")
+    parser.add_argument(
+        "--side", choices=["left", "right"], default="right",
+        help="選擇要偵測的慣用手，預設為右手(right)",
+    )
+    args = parser.parse_args()
+    landmark_names, _ = build_landmark_names(args.side)
+    print(f"目前偵測手臂：{'左手' if args.side == 'left' else '右手'}")
+
     cap = cv2.VideoCapture(0)
     cap.set(3, 640)
     cap.set(4, 480)
@@ -89,9 +104,9 @@ def main():
 
             if results.pose_landmarks:
                 lm = results.pose_landmarks.landmark
-                hip, hip_vis = get_point(lm, LANDMARK_NAMES["HIP"])
-                shoulder, sh_vis = get_point(lm, LANDMARK_NAMES["SHOULDER"])
-                wrist, wr_vis = get_point(lm, LANDMARK_NAMES["WRIST"])
+                hip, hip_vis = get_point(lm, landmark_names["HIP"])
+                shoulder, sh_vis = get_point(lm, landmark_names["SHOULDER"])
+                wrist, wr_vis = get_point(lm, landmark_names["WRIST"])
                 left_wrist, lw_vis = get_point(lm, "LEFT_WRIST")
                 right_wrist, rw_vis = get_point(lm, "RIGHT_WRIST")
 
@@ -100,12 +115,12 @@ def main():
                     wrists_together = wrists_dist <= WRISTS_TOGETHER_MAX_DIST
 
                     state, angle_value = classify_state(hip, shoulder, wrist, wrists_together)
-                    predicted_label = state if state else "S0"
+                    predicted_label = state  # None(過渡角度)保持None,不誤判成S0(中立姿勢)
 
                     if predicted_label == "S1":
-                        confidence = angle_to_confidence(angle_value, 90)
+                        confidence = angle_to_confidence(angle_value, 80, tolerance=30)
                     elif predicted_label == "S2":
-                        confidence = angle_to_confidence(angle_value, 180, tolerance=40)
+                        confidence = angle_to_confidence(angle_value, 170, tolerance=30)
 
                 draw_body_pose(image, results.pose_landmarks)
 
@@ -122,7 +137,7 @@ def main():
             draw.text((10, 10), f"目前動作：{predicted_label_chinese}", fill=(0, 0, 0), font=font)
 
             prompt_text = {
-                "NEUTRAL_WAIT": "請回到中立姿勢(手臂自然垂下)",
+                "NEUTRAL_WAIT": "請回到準備動作（立正站好，手臂自然垂下）",
                 "AWAITING_S1": f"請做「{action_mapping['S1']}」動作",
                 "AWAITING_S2": f"請做「{action_mapping['S2']}」動作",
             }.get(counter.phase, "")

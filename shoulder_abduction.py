@@ -10,6 +10,7 @@
 #             angle ≈ 150°~180°  手臂舉高貼近耳朵（S2 肩部上舉）
 # ------------------------------------------------------------
 
+import argparse
 import time
 import cv2
 import numpy as np
@@ -20,14 +21,14 @@ from pose_utils import (
     get_point,
     calculate_angle,
     RepCounter,
-    LANDMARK_NAMES,
+    build_landmark_names,
     draw_body_pose,
 )
 
-# ---- 角度區間設定（可依實測數據微調） ----
+# ---- 角度區間設定（依實測數據校正） ----
 S1_ANGLE_MIN, S1_ANGLE_MAX = 70, 110     # 側舉：約90度
-S2_ANGLE_MIN = 150                        # 上舉：接近180度
-S0_ANGLE_MAX = 20                         # 預備姿勢：手臂垂下
+S2_ANGLE_MIN = 125                        # 上舉：實測最標準約140度(上臂角度,非手腕),留一些緩衝
+S0_ANGLE_MAX = 15                         # 預備姿勢：立正站好，手臂垂下
 VISIBILITY_THRESHOLD = 0.5                # 關節點可信度門檻
 
 TARGET_COUNT = 5
@@ -62,6 +63,15 @@ def angle_to_confidence(angle, target_angle, tolerance=30):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="手臂側舉(肩關節外展)偵測程式")
+    parser.add_argument(
+        "--side", choices=["left", "right"], default="right",
+        help="選擇要偵測的慣用手，預設為右手(right)",
+    )
+    args = parser.parse_args()
+    landmark_names, _ = build_landmark_names(args.side)
+    print(f"目前偵測手臂：{'左手' if args.side == 'left' else '右手'}")
+
     cap = cv2.VideoCapture(0)
     cap.set(3, 640)
     cap.set(4, 480)
@@ -94,18 +104,18 @@ def main():
 
             if results.pose_landmarks:
                 lm = results.pose_landmarks.landmark
-                hip, hip_vis = get_point(lm, LANDMARK_NAMES["HIP"])
-                shoulder, sh_vis = get_point(lm, LANDMARK_NAMES["SHOULDER"])
-                elbow, el_vis = get_point(lm, LANDMARK_NAMES["ELBOW"])
+                hip, hip_vis = get_point(lm, landmark_names["HIP"])
+                shoulder, sh_vis = get_point(lm, landmark_names["SHOULDER"])
+                elbow, el_vis = get_point(lm, landmark_names["ELBOW"])
 
                 if min(hip_vis, sh_vis, el_vis) >= VISIBILITY_THRESHOLD:
                     state, angle_value = classify_state(hip, shoulder, elbow)
-                    predicted_label = state if state else "S0"
+                    predicted_label = state  # None(過渡角度)保持None,不誤判成S0(中立姿勢)
 
                     if predicted_label == "S1":
                         confidence = angle_to_confidence(angle_value, 90)
                     elif predicted_label == "S2":
-                        confidence = angle_to_confidence(angle_value, 180, tolerance=40)
+                        confidence = angle_to_confidence(angle_value, 140, tolerance=30)
 
                 draw_body_pose(image, results.pose_landmarks)
 
@@ -123,7 +133,7 @@ def main():
             draw.text((10, 10), f"目前動作：{predicted_label_chinese}", fill=(0, 0, 0), font=font)
 
             prompt_text = {
-                "NEUTRAL_WAIT": "請回到中立姿勢(手臂自然垂下)",
+                "NEUTRAL_WAIT": "請回到準備動作（立正站好，手臂自然垂下）",
                 "AWAITING_S1": f"請做「{action_mapping['S1']}」動作",
                 "AWAITING_S2": f"請做「{action_mapping['S2']}」動作",
             }.get(counter.phase, "")

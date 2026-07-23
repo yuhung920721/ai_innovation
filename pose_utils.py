@@ -28,6 +28,35 @@ LANDMARK_NAMES = {
 OPPOSITE_SIDE = "LEFT" if WORKING_SIDE == "RIGHT" else "RIGHT"
 OPPOSITE_SHOULDER_NAME = f"{OPPOSITE_SIDE}_SHOULDER"
 
+
+def build_landmark_names(side="RIGHT"):
+    """
+    依指定的慣用手("RIGHT" 或 "LEFT")，建立對應的關節點名稱對照表，
+    供左右手測試/切換使用。
+
+    用法(在各動作程式的 main() 裡):
+        landmark_names, opposite_shoulder_name = build_landmark_names(args.side)
+        ...
+        hip, hip_vis = get_point(lm, landmark_names["HIP"])
+
+    回傳:
+        (landmark_names_dict, opposite_shoulder_name_str)
+    """
+    side = side.upper()
+    if side not in ("LEFT", "RIGHT"):
+        raise ValueError(f"side 必須是 'LEFT' 或 'RIGHT'，收到: {side}")
+
+    opposite = "LEFT" if side == "RIGHT" else "RIGHT"
+    landmark_names = {
+        "SHOULDER": f"{side}_SHOULDER",
+        "ELBOW": f"{side}_ELBOW",
+        "WRIST": f"{side}_WRIST",
+        "HIP": f"{side}_HIP",
+        "EAR": f"{side}_EAR",
+    }
+    opposite_shoulder_name = f"{opposite}_SHOULDER"
+    return landmark_names, opposite_shoulder_name
+
 # ---- 臉部節點設定（繪製骨架時排除，減少畫面雜訊） ----
 # 0:鼻子 1-3:左眼(內/中/外) 4-6:右眼(內/中/外) 9-10:嘴巴(左/右)
 # 保留 7,8(左右耳)，因為「手臂後舉」動作需要用耳朵座標判斷手是否貼近後頸
