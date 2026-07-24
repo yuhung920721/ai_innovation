@@ -5,3 +5,22 @@ __pycache__/
 .idea/
 *.h5
 *.log
+
+# 環境變數（API key）
+.env
+.env.local
+
+# 資料庫檔案 —— 內含真實使用者的復健數據，屬於健康資訊，不該進版控
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# 作業系統產生的雜項檔案
+.DS_Store
+Thumbs.db
+
+# 測試/校正時可能產生的錄影或截圖（如果有存的話）
+*.mp4
+*.avi
+calibration_output/

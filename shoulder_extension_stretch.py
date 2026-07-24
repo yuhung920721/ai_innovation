@@ -25,6 +25,21 @@ import cv2
 import numpy as np
 from PIL import ImageFont, ImageDraw, Image
 
+# ---- AI 復健報告服務（提前載入，避免完成動作那一瞬間才第一次載入套件造成卡頓）----
+try:
+    from services.report_service import submit_session, warm_up
+    _report_service_ready = True
+except ImportError as e:
+    print(f"[AI報告] 找不到 services 模組，AI報告功能停用: {e}")
+    _report_service_ready = False
+
+    def submit_session(*args, **kwargs):
+        pass
+
+    def warm_up():
+        pass
+
+
 from pose_utils import (
     mp_pose,
     get_point,
@@ -83,6 +98,8 @@ def main():
     landmark_names, _ = build_landmark_names(args.side)
     print(f"目前偵測手臂：{'左手' if args.side == 'left' else '右手'}")
 
+    warm_up()  # 提前載入 AI 報告會用到的套件，避免完成動作那一刻才卡頓
+
     cap = cv2.VideoCapture(0)
     cap.set(3, 640)
     cap.set(4, 480)
@@ -91,6 +108,8 @@ def main():
 
     counter = RepCounter(target_count=TARGET_COUNT)
     action_mapping = {"S0": "無動作", "S1": "雙臂上舉", "S2": "雙臂後舉", None: "動作中"}
+    session_start_time = time.time()  # 用來計算本次訓練耗時
+    report_submitted = False          # 確保完成後只觸發一次 AI 報告
 
     with mp_pose.Pose(
         min_detection_confidence=0.5, min_tracking_confidence=0.5, model_complexity=1
@@ -145,6 +164,21 @@ def main():
             is_s2 = predicted_label == "S2"
             is_neutral = predicted_label == "S0"
             counter.update(is_s1, is_s2, is_neutral, confidence_this_frame=confidence, timestamp=now)
+
+            # ---- 完成瞬間觸發 AI 復健報告（只會執行這一次）----
+            if counter.finished and not report_submitted:
+                report_submitted = True
+                # submit_session 內部是 fire-and-forget（含資料庫寫入都在背景執行緒），
+                # 這裡呼叫幾乎是零成本，不會造成畫面卡頓
+                submit_session(
+                    exercise_type="肩後伸暨觸頸伸展（手臂後舉）",
+                    side=args.side,
+                    target_count=counter.target_count,
+                    completed_count=counter.total,
+                    average_score=counter.average_score,
+                    duration_sec=time.time() - session_start_time,
+                    rep_history=counter.rep_history,
+                )
 
             image = cv2.flip(image, 1)
             pil_image = Image.fromarray(image)

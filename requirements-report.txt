@@ -1,0 +1,4 @@
+# AI 復健報告功能新增的套件（原有 requirements.txt 之外）
+google-genai
+pydantic
+python-dotenv

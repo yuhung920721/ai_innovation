@@ -185,6 +185,10 @@ class RepCounter:
         self.neutral_hold_seconds = neutral_hold_seconds
         self.exit_hold_seconds = exit_hold_seconds
 
+        # 每一次動作完成時的細節紀錄（給 AI 復健報告用，可看出逐次表現趨勢）
+        # 每筆格式: {"rep_index": int, "s1_score": float, "s2_score": float, "rep_score": float}
+        self.rep_history = []
+
         # 背景分數精算用的追蹤變數
         self._s1_best = None
         self._s2_best = None
@@ -212,6 +216,12 @@ class RepCounter:
         if self._score_pending and self._s1_best is not None and self._s2_best is not None:
             rep_score = (self._s1_best + self._s2_best) / 2.0
             self.score_sum += rep_score
+            self.rep_history.append({
+                "rep_index": self.total,
+                "s1_score": round(self._s1_best, 1),
+                "s2_score": round(self._s2_best, 1),
+                "rep_score": round(rep_score, 1),
+            })
         self._score_pending = False
 
     def _reset_for_new_rep(self):
